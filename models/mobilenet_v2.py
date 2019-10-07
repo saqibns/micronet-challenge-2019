@@ -3,6 +3,25 @@ from torch import nn
 from . import model_helpers
 
 
+class ParametrizedConcatPool(nn.Module):
+    def __init__(self, kernel_size):
+        super().__init__()
+        self.apool = nn.AvgPool2d(kernel_size)
+        self.mpool = nn.MaxPool2d(kernel_size)
+
+        self.ascale = nn.Parameter(torch.ones(1))
+        self.ashift = nn.Parameter(torch.zeros(1))
+
+        self.mscale = nn.Parameter(torch.ones(1))
+        self.mshift = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        return torch.cat([
+                self.ascale * self.apool(x) + self.ashift,
+                self.mscale * self.mpool(x) + self.mshift
+            ], dim=1)
+
+
 class ConcatPool(nn.Module):
     def __init__(self, kernel_size):
         super().__init__()
@@ -53,6 +72,50 @@ class ResBlock(nn.Module):
 
 
 class ResBlock2(nn.Module):
+    def __init__(self, inf, outf, expand, neg_slope, downsample=False, parametrized_pool=False):
+        super().__init__()
+
+        # Expand Block
+        c = int(inf * expand)
+        self.downsample = downsample
+        if downsample:
+            mid_stride = 2
+        else:
+            mid_stride = 1
+        self.trunk = nn.Sequential(
+            nn.Conv2d(inf, c, 1, stride=1, padding=0),
+            nn.BatchNorm2d(c),
+            nn.LeakyReLU(negative_slope=neg_slope, inplace=True),
+
+            nn.Conv2d(c, c, 3, stride=mid_stride, padding=1, groups=c),
+            nn.BatchNorm2d(c),
+            nn.LeakyReLU(negative_slope=neg_slope, inplace=True),
+
+            nn.Conv2d(c, outf, 1, stride=1, padding=0),
+            nn.BatchNorm2d(outf)
+        )
+
+        # Initialize weights
+        model_helpers.weight_init(self.trunk)
+        # Initialize last batchnorm after the residual connnection (Xie et al)
+        if downsample:
+            if parametrized_pool:
+                self.pool = ParametrizedConcatPool(2)
+            else:
+                self.pool = ConcatPool(2)
+
+        nn.init.zeros_(self.trunk[-1].weight)
+        nn.init.zeros_(self.trunk[-1].bias)
+
+    def forward(self, x):
+        y = self.trunk(x)
+        # Skip connection based on whether or not downsampling occurred
+        if self.downsample:
+            return self.pool(x) + y
+        return x + y
+
+
+class ResBlock3(nn.Module):
     def __init__(self, inf, outf, expand, neg_slope, downsample=False):
         super().__init__()
 
@@ -80,7 +143,7 @@ class ResBlock2(nn.Module):
         model_helpers.weight_init(self.trunk)
         # Initialize last batchnorm after the residual connnection (Xie et al)
         if downsample:
-            self.pool = ConcatPool(2)
+            self.pool = ParametrizedConcatPool(2)
         nn.init.zeros_(self.trunk[-1].weight)
         nn.init.zeros_(self.trunk[-1].bias)
 

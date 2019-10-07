@@ -6,9 +6,22 @@ from torch import optim
 import torch.nn.functional as F
 
 
+class LabelSmoothingLoss(nn.Module):
+    def __init__(self, epsilon, num_classes):
+        super().__init__()
+        self.eps = epsilon
+        self.nc = num_classes
+        self.inverse_eps = self.eps / (self.nc - 1)
+
+    def forward(self, predictions, targets):
+        smooth_targets = torch.zeros_like(predictions).scatter_(1, targets.view(-1, 1), 1.0)
+        smooth_targets = smooth_targets * (1 - self.eps) + (1 - smooth_targets) * self.inverse_eps
+        return -(smooth_targets * predictions).sum(dim=1).mean()
+
+
 class DistillModel(lightning.LightningModule):
     def __init__(self, teacher_model, student_model, temperature, alpha, batch_size,
-                 learning_rate, workers, label_smoothing=False, epsilon=0.1):
+                 learning_rate, workers, label_smoothing=False, epsilon=0.1, num_classes=100):
         super().__init__()
 
         self.teacher = teacher_model
@@ -25,7 +38,10 @@ class DistillModel(lightning.LightningModule):
         self.label_smoothing = label_smoothing
         self.epsilon = epsilon
         self.kldiv = nn.KLDivLoss(reduction='batchmean')
-        self.nll = nn.NLLLoss()
+        if label_smoothing:
+            self.nll = LabelSmoothingLoss(epsilon, num_classes)
+        else:
+            self.nll = nn.NLLLoss()
 
     def forward(self, x):
         teacher_out = self.teacher(x)
