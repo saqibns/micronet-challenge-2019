@@ -19,9 +19,20 @@ class LabelSmoothingLoss(nn.Module):
         return -(smooth_targets * predictions).sum(dim=1).mean()
 
 
+class JSDiv(nn.Module):
+    def __init__(self, reduction):
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, p, q):
+        pq = F.kl_div(F.log_softmax(p, dim=1), F.softmax(q, dim=1), reduction=self.reduction)
+        qp = F.kl_div(F.log_softmax(q, dim=1), F.softmax(p, dim=1), reduction=self.reduction)
+        return (pq + qp) * 0.5
+
+
 class DistillModel(lightning.LightningModule):
     def __init__(self, teacher_model, student_model, temperature, alpha, batch_size,
-                 learning_rate, workers, label_smoothing=False, epsilon=0.1, num_classes=100):
+                 learning_rate, workers, label_smoothing=False, epsilon=0.1, num_classes=100, use_jsdiv=False):
         super().__init__()
 
         self.teacher = teacher_model
@@ -38,6 +49,8 @@ class DistillModel(lightning.LightningModule):
         self.label_smoothing = label_smoothing
         self.epsilon = epsilon
         self.kldiv = nn.KLDivLoss(reduction='batchmean')
+        self.jsdiv = JSDiv(reduction='batchmean')
+        self.use_jsdiv = use_jsdiv
         if label_smoothing:
             self.nll = LabelSmoothingLoss(epsilon, num_classes)
         else:
@@ -49,10 +62,13 @@ class DistillModel(lightning.LightningModule):
         return teacher_out, student_out
 
     def distillation_loss(self, teacher_out, student_out, y):
-        dark_knowledge = self.kldiv(
-            F.log_softmax(student_out / self.T, dim=1),
-            F.softmax(teacher_out / self.T, dim=1)
-        )
+        if self.use_jsdiv:
+            dark_knowledge = self.jsdiv(student_out / self.T, teacher_out / self.T)
+        else:
+            dark_knowledge = self.kldiv(
+                F.log_softmax(student_out / self.T, dim=1),
+                F.softmax(teacher_out / self.T, dim=1)
+            )
         label_loss = self.nll(F.log_softmax(student_out, dim=1), y)
         total_loss = dark_knowledge * self.alpha * self.T * self.T + \
                      (1 - self.alpha) * label_loss
